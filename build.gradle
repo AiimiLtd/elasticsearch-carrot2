@@ -1,11 +1,8 @@
 
-// This plugin's version (typically must match that of ES).
-version = '7.5.1'
-group = 'org.carrot2'
-
 buildscript {
   ext {
-    version_es = '7.5.1'
+    version_es = '7.9.3'
+    version_c2 = 'org.carrot2:carrot2-core:4.0.4'
   }
 
   repositories {
@@ -18,30 +15,18 @@ buildscript {
   }
 }
 
-apply plugin: 'java'
-apply plugin: 'idea'
+plugins {
+  id 'java-library'
+  id 'idea'
+  id 'com.diffplug.gradle.spotless' version "4.5.1" apply false
+}
+
 apply plugin: 'elasticsearch.esplugin'
-apply plugin: 'nebula.maven-base-publish'
+apply from: file('gradle/validation/spotless.gradle')
 
-// >>> Build HACK for 7.5.0
-
-import org.elasticsearch.gradle.testclusters.TestClustersRegistry
-import org.elasticsearch.gradle.testclusters.TestClustersPlugin
-
-configurations.whenObjectAdded { c ->
-  if (c.name == 'elasticsearch_7.5.0_integ_test_zip_null') {
-    project.dependencies.add(c.name, 'org.elasticsearch.distribution.integ-test-zip:elasticsearch:7.5.0@zip')
-  }
-}
-
-configure(rootProject) {
-  TestClustersRegistry registry = rootProject.extensions.create("testClustersRegistry", TestClustersRegistry)
-  TestClustersPlugin.configureClaimClustersHook(project.gradle, registry)
-  TestClustersPlugin.configureStartClustersHook(project.gradle, registry)
-  TestClustersPlugin.configureStopClustersHook(project.gradle, registry)
-}
-
-// <<< Build HACK for 7.5.0
+// This plugin's version (typically must match that of ES).
+version = '7.9.3'
+group = 'org.carrot2'
 
 repositories {
   mavenLocal()
@@ -52,6 +37,7 @@ ext {
   projectSubstitutions = [:]
   licenseFile = rootProject.file('LICENSE.txt')
   noticeFile = rootProject.file('NOTICE.txt')
+  c2version = ""
 }
 
 esplugin {
@@ -60,34 +46,47 @@ esplugin {
   classname 'org.carrot2.elasticsearch.ClusteringPlugin'
 }
 
+configurations {
+  c2resources
+}
+
 // esplugin forces transitive:false on all dependencies
 // so list all transitive dependencies individually
 dependencies {
-  compile "org.carrot2:carrot2-core:4.0.0-beta2"
-  compile "com.carrotsearch:hppc:0.8.1"
-  compile "org.slf4j:slf4j-api:1.7.13"
+  c2resources(version_c2, {
+    transitive false
+  })
 
-/*
-  compile "org.apache.commons:commons-lang3:3.5"
-  compile "org.apache.logging.log4j:log4j-slf4j-impl:2.11.1"
-  compile "org.carrot2:morfologik-stemming:2.1.5"
-  compile "org.carrot2:morfologik-fsa:2.1.5"
-*/
+  compile(version_c2, {
+    exclude group: "com.carrotsearch", module: "hppc"
+  })
 
-  testCompile "com.fasterxml.jackson.core:jackson-core:2.8.11"
-  testCompile "com.fasterxml.jackson.core:jackson-annotations:2.8.11"
-  testCompile "com.fasterxml.jackson.core:jackson-databind:2.8.11"
+  testCompile "com.fasterxml.jackson.core:jackson-core:2.10.4"
+  testCompile "com.fasterxml.jackson.core:jackson-annotations:2.10.4"
+  testCompile "com.fasterxml.jackson.core:jackson-databind:2.10.4"
 
-  testCompile "com.google.guava:guava:28.2-jre"
-  testCompile "org.assertj:assertj-core:3.12.0"
+  testCompile "org.assertj:assertj-core:3.13.2"
   testCompile "org.elasticsearch.client:transport:" + version_es
 
   testCompile "org.apache.httpcomponents:httpclient:${versions.httpclient}"
   testCompile "org.apache.httpcomponents:httpcore:${versions.httpcore}"
 }
 
+configurations.all { config ->
+  resolutionStrategy {
+    force "commons-logging:commons-logging:1.2"
+  }
+}
+
+// Set target compatibility
+sourceCompatibility = 11
+targetCompatibility = 11
+
 // We don't have unit tests, only integration tests.
 test.enabled = false
+
+// logger check does not run on jdk 11 bytecode.
+loggerUsageCheck.enabled = false
 
 // Audits
 licenseHeaders.enabled = false
@@ -112,13 +111,43 @@ testClusters.integTest {
   }
 }
 
+bundlePlugin {
+  from({ zipTree(configurations.c2resources.asPath).matching { include "**/*.utf8" } }, {
+    eachFile { fcd ->
+      fcd.path -= "org/carrot2/language/"
+    }
+    includeEmptyDirs = false
+
+    into 'config'
+  })
+}
+
+// Disable POM validation inside ES infrastructure.
+tasks.matching {it.path in [":validateMavenPom", ":validateNebulaPom"]}.all { task ->
+  task.enabled = false
+}
+
 // Configure publishing.
 configure(rootProject) {
   apply plugin: 'maven-publish'
   apply plugin: 'signing'
 
+  ext {
+    mavenBuildRepo = file("${buildDir}/maven")
+  }
+
+  // Do not generate gradle metadata files.
+  tasks.withType(GenerateModuleMetadata) {
+    enabled = false
+  }
+
   publishing {
     repositories {
+      maven {
+        name = 'build'
+        url = mavenBuildRepo
+      }
+
       maven {
         name = 'sonatype'
         url "https://oss.sonatype.org/service/local/staging/deploy/maven2"
@@ -146,7 +175,8 @@ configure(rootProject) {
         pom {
           name = esplugin.name
           description = esplugin.description
-          url = 'https://github.com/carrot2/elasticsearch-carrot2'
+          // Added automatically by ES plugin.
+          // url = 'https://github.com/carrot2/elasticsearch-carrot2'
           inceptionYear = "2013"
           artifactId 'elasticsearch-carrot2'
           licenses {
@@ -171,11 +201,14 @@ configure(rootProject) {
               email = 'dawid.weiss@carrotsearch.com'
             }
           }
+          // Added automatically by ES plugin.
+          /*
           scm {
             connection = 'scm:git:https://github.com/carrot2/elasticsearch-carrot2'
             developerConnection = 'scm:git:git@github.com:carrot2/elasticsearch-carrot2.git'
-            url = 'https://github.com/carrot2/elasticsearch-carrot2'
+            // url = 'https://github.com/carrot2/elasticsearch-carrot2'
           }
+           */
         }
       }
     }
@@ -187,5 +220,31 @@ configure(rootProject) {
 
   task publishToSonatype() {
     dependsOn publishMavenPublicationToSonatypeRepository
+  }
+
+  tasks.matching { it.path == ":publishMavenPublicationToBuildRepository" }.all {
+    doFirst {
+      delete mavenBuildRepo
+    }
+  }
+
+  task publishToLocal() {
+    group "Publishing"
+    description "Publish Maven artifacts locally to " + file(mavenBuildRepo)
+
+    dependsOn ":publishMavenPublicationToBuildRepository"
+  }
+
+  task sonatypeBundle(type: Zip) {
+    group "Publishing"
+    description "Prepare a sonatype bundle archive with all artifacts."
+
+    dependsOn publishToLocal
+
+    archiveFileName = "bundle-${project.archivesBaseName}-${project.version}.zip"
+    destinationDirectory = file("${buildDir}/sonatype")
+
+    from(file("${mavenBuildRepo}/org/carrot2/elasticsearch-carrot2/${project.version}"), {
+    })
   }
 }
